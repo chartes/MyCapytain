@@ -17,6 +17,8 @@ from MyCapytain.resources.collections.capitains import XmlCapitainsCollectionMet
 from MyCapytain.resources.collections.cts import XmlCtsCitation
 from MyCapytain.resources.prototypes.capitains.collection import CapitainsCollectionMetadata
 from MyCapytain.resources.texts.local.capitains.cts import CapitainsCtsText
+from MyCapytain.resources.texts.local.capitains.dts import CapitainsDtsText
+
 from MyCapytain.common.constants import RDF_NAMESPACES
 from typing import Dict, List, Union
 
@@ -44,7 +46,7 @@ class XmlCapitainsLocalResolver(Resolver):
 
     """
     CLASSES = {
-        "Text": CapitainsCtsText,
+        "Text": CapitainsDtsText,
         "ReadableCollection": XmlCapitainsReadableMetadata,
         "Collection": XmlCapitainsCollectionMetadata,
         "citation": XmlCtsCitation
@@ -108,7 +110,7 @@ class XmlCapitainsLocalResolver(Resolver):
         """
         return xmlparser(file)
 
-    def read(self, identifier: str, path: str) -> CapitainsCtsText:
+    def read(self, identifier: str, path: str) -> Union[CapitainsCtsText, CapitainsDtsText]:
         """ Retrieve and parse a text given an identifier
 
         :param identifier: Identifier of the text
@@ -116,7 +118,7 @@ class XmlCapitainsLocalResolver(Resolver):
         :param path: Path of the text
         :type path: str
         :return: Parsed Text
-        :rtype: CapitainsCtsText
+        :rtype: Union[CapitainsCtsText, CapitainsDtsText]
         """
         with open(path) as f:
             o = self.classes["Text"](urn=identifier, resource=self.xmlparse(f))
@@ -252,12 +254,12 @@ class XmlCapitainsLocalResolver(Resolver):
 
         return self.inventory
 
-    def _get_text(self, identifier: str) -> (Union[CapitainsCtsText, None], XmlCapitainsReadableMetadata):
+    def _get_text(self, identifier: str) -> (Union[CapitainsCtsText, CapitainsDtsText, None], XmlCapitainsReadableMetadata):
         """ Returns a XmlCapitainsReadableMetadata object
         :param identifier: URN of a text to retrieve
         :type identifier: str, URN
         :return: Textual resource and metadata
-        :rtype: (CapitainsCtsText, XmlCapitainsReadableMetadata)
+        :rtype: (Union[CapitainsCtsText, CapitainsDtsText], XmlCapitainsReadableMetadata)
         """
         # This will raise an UnknownCollection error if the identifier does not exist in the collection
         # I assume that this is the desired outcome. If not, we can do a try/except here.
