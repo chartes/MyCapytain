@@ -3,67 +3,168 @@
 
 
 """
-from MyCapytain.common.constants import XPATH_NAMESPACES
-from MyCapytain.common.reference import Citation, URN as URNCTS, CtsReference
-from MyCapytain.errors import MissingRefsDecl
-from MyCapytain.resources.texts.local.capitains.cts import CapitainsCtsText, CapitainsCtsPassage
+import lxml.etree as etree
+
+from MyCapytain.resources.prototypes.text import InteractiveTextualNode
+from MyCapytain.resources.texts.base.tei import TeiResource
+from MyCapytain.resources.texts.local.capitains.cts import CapitainsCtsPassage
 
 __all__ = [
     "CapitainsDtsText",
     "CapitainsDtsPassage"
 ]
 
-
-class URNDTS(URNCTS):
-
-    def __parse__(self, urn):
-        """ Parse a URN
-
-        :param urn: A URN:CTS
-        :type urn: basestring
-        :rtype: defaultdict.basestring
-        :returns: Dictionary representation
-        """
-        parsed = URNCTS.model()
-        self.__urn = urn.split("#")[0]
-        urn = self.__urn.split(":")
-        if isinstance(urn, list) and len(urn) > 2:
-            parsed["urn_namespace"] = urn[1]
-            parsed["cts_namespace"] = urn[2]
-
-            if len(urn) == 5:
-                parsed["reference"] = DtsReference(urn[4])
-
-            if len(urn) >= 4:
-                urn = urn[3].split(".")
-                if len(urn) >= 1:
-                    parsed["textgroup"] = urn[0]
-                if len(urn) >= 2:
-                    parsed["work"] = urn[1]
-                if len(urn) >= 3:
-                    parsed["version"] = urn[2]
-        else:
-            raise ValueError("URN is empty and I'm so sad about it")
-        return parsed
-
-
-class CapitainsDtsText(CapitainsCtsText):
-
-    def __init__(self, urn=None, citation=None, resource=None):
-        u = URNDTS(str(urn))
-        super(CapitainsDtsText, self).__init__(urn=u, citation=citation, resource=resource)
-
-    def _findCRefPattern(self, xml):
-        """ Find CRefPattern in the text and set object.citation
-        :param xml: Xml Resource
-        :type xml: lxml.etree._Element
-        :return: None
-        """
-        if not self.citation.is_set():
-            citation = xml.xpath("//tei:refsDecl[@n='capitains']", namespaces=XPATH_NAMESPACES)
-            if len(citation):
-                self.citation = Citation.ingest(resource=citation[0], xpath=".//tei:cRefPattern")
-            else:
-                raise MissingRefsDecl("No reference declaration (refsDecl) found.")
-
 CapitainsDtsPassage = CapitainsCtsPassage
+
+#TODO
+# forker DtsCitation et DtsCitationSet
+
+#TODO
+class _NewSharedMethods(TeiResource):
+    def getTextualNode(self, subreference=None, simple=False):
+        """ Finds a passage in the current text
+
+        :param subreference: Identifier of the subreference / passages
+        :type subreference: Union[list, CtsReference]
+        :param simple: If set to true, retrieves nodes up to the given one, cleaning non required siblings.
+        :type simple: boolean
+        :rtype: CapitainsCtsPassage, ContextPassage
+        :returns: Asked passage
+        """
+        if subreference is None:
+            return self._getSimplePassage()
+
+        if not isinstance(subreference, CtsReference):
+            if isinstance(subreference, str):
+                subreference = CtsReference(subreference)
+            elif isinstance(subreference, list):
+                subreference = CtsReference(".".join(subreference))
+
+        if len(subreference.start) > self.citation.root.depth:
+            raise CitationDepthError("URN is deeper than citation scheme")
+
+        if simple is True:
+            return self._getSimplePassage(subreference)
+
+        if not subreference.is_range():
+            start = end = subreference.start.list
+        else:
+            start, end = subreference.start.list, subreference.end.list
+
+        citation_start = self.citation.root[len(start) - 1]
+        citation_end = self.citation.root[len(end) - 1]
+
+        start, end = citation_start.fill(passage=start), citation_end.fill(passage=end)
+        start, end = normalizeXpath(start.split("/")[2:]), normalizeXpath(end.split("/")[2:])
+
+        xml = self.textObject.xml
+
+        if isinstance(xml, etree._Element):
+            root = copyNode(xml)
+        else:
+            root = copyNode(xml.getroot())
+
+        root = passageLoop(xml, root, start, end)
+
+        if self.urn:
+            urn = URN("{}:{}".format(self.urn, subreference))
+        else:
+            urn = None
+
+        return CapitainsCtsPassage(
+            urn=urn,
+            resource=root,
+            text=self,
+            citation=citation_start,
+            reference=subreference
+        )
+
+    def _getSimplePassage(self, reference=None):
+        """ Retrieve a single node representing the passage.
+
+        .. warning:: Range support is awkward.
+
+        :param reference: Identifier of the subreference / passages
+        :type reference: list, reference
+        :returns: Asked passage
+        :rtype: CapitainsCtsPassage
+        """
+        if reference is None:
+            return _SimplePassage(
+                resource=self.resource,
+                reference=None,
+                urn=self.urn,
+                citation=self.citation.root,
+                text=self
+            )
+
+        subcitation = self.citation.root[reference.depth - 1]
+        resource = self.resource.xpath(
+            subcitation.fill(reference),
+            namespaces=XPATH_NAMESPACES
+        )
+
+        if len(resource) != 1:
+            raise InvalidURN
+
+        return _SimplePassage(
+            resource[0],
+            reference=reference,
+            urn=self.urn,
+            citation=subcitation,
+            text=self.textObject
+        )
+
+    @property
+    def textObject(self):
+        """ Textual Object with full capacities (Unlike Simple CapitainsCtsPassage)
+
+        :rtype: CtsTextMetadata, CapitainsCtsPassage
+        :return: Textual Object with full capacities (Unlike Simple CapitainsCtsPassage)
+        """
+        text = None
+        if isinstance(self, CapitainsCtsText):
+            text = self
+        return text
+
+    def getReffs(self, level: int = 1, subreference: CtsReference = None) -> CtsReferenceSet:
+        """ CtsReference available at a given level
+
+        :param level: Depth required. If not set, should retrieve first encountered level (1 based)
+        :param subreference: Subreference (optional)
+        :returns: List of levels
+        """
+
+        if not subreference and hasattr(self, "reference"):
+            subreference = self.reference
+        elif subreference and not isinstance(subreference, CtsReference):
+            subreference = CtsReference(subreference)
+
+        return self.getValidReff(level=level, reference=subreference)
+
+
+    def xpath(self, *args, **kwargs):
+        """ Perform XPath on the passage XML
+
+        :param args: Ordered arguments for etree._Element().xpath()
+        :param kwargs: Named arguments
+        :return: Result list
+        :rtype: list(etree._Element)
+        """
+        if "smart_strings" not in kwargs:
+            kwargs["smart_strings"] = False
+        return self.resource.xpath(*args, **kwargs)
+
+    def tostring(self, *args, **kwargs):
+        """ Transform the CapitainsCtsPassage in XML string
+
+        :param args: Ordered arguments for etree.tostring() (except the first one)
+        :param kwargs: Named arguments
+        :return:
+        """
+        return etree.tostring(self.resource, *args, **kwargs)
+
+#TODO
+class CapitainsDtsText(InteractiveTextualNode, _NewSharedMethods):
+    pass
+
