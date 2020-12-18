@@ -273,7 +273,7 @@ class XmlCapitainsLocalResolver(Resolver):
 
         if os.path.isfile(text.path):
             with io.open(text.path) as _xml:
-                resource = self.classes["Text"](urn=identifier, resource=self.xmlparse(_xml))
+                resource = self.classes["Text"](identifier=identifier, resource=self.xmlparse(_xml))
         else:
             # Passing None to the functions that call __getText__ results in a not very helpful AttributeError
             # A more informative error should be raised here.
@@ -373,10 +373,17 @@ class XmlCapitainsLocalResolver(Resolver):
         :return: CapitainsCtsPassage
         :rtype: CapitainsCtsPassage
         """
+
         text, text_metadata = self._get_text(textId)
         if subreference is not None and not isinstance(subreference, CtsReference):
             subreference = CtsReference(subreference)
-        passage = text.getTextualNode(subreference)
+        #A cette endroit précis si on suinte les metadata, on peut envoyer tout le texte en xml
+
+        if subreference == None:
+            passage = text
+        else:
+            passage = text.getTextualNode(subreference)
+        #passage = text.getTextualNode(subreference)
         if metadata:
             passage._metadata = text_metadata.metadata
         return passage
