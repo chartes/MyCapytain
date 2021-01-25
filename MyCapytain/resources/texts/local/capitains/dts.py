@@ -3,34 +3,60 @@
 
 
 """
-import lxml.etree as etree
+
+import warnings
 
 from typing import Tuple, Optional
+from MyCapytain.errors import DuplicateReference, MissingAttribute, RefsDeclError, EmptyReference, CitationDepthError, MissingRefsDecl
+from MyCapytain.common.utils.xml import copyNode, normalizeXpath, passageLoop
 from MyCapytain.common.constants import XPATH_NAMESPACES
 from MyCapytain.resources.prototypes.text import InteractiveTextualNode
 from MyCapytain.resources.texts.base.tei import TeiResource
-from MyCapytain.resources.texts.local.capitains.cts import CapitainsCtsPassage, CtsReference, CtsReferenceSet
+from MyCapytain.resources.texts.local.capitains.cts import CapitainsCtsPassage
 #A voir si on garde ou si on doit modifier
-from MyCapytain.common.reference import Citation
+from MyCapytain.common.reference import Citation, URN, DtsReference, DtsReferenceSet, DtsCitation
 from MyCapytain.resources.prototypes.cts.text import PrototypeCtsPassage, PrototypeCtsText
+from MyCapytain.resources.prototypes.dts.text import PrototypeDtsPassage, PrototypeDtsText
+
+import lxml.etree as etree
 
 __all__ = [
     "CapitainsDtsText",
     "CapitainsDtsPassage"
 ]
 
-CapitainsDtsPassage = CapitainsCtsPassage
+#CapitainsDtsPassage = CapitainsCtsPassage
 
 #TODO
 # forker DtsCitation et DtsCitationSet
 
+#Réécriture
+def _make_passage_kwargs(identifier, reference):
+    """ Little helper used by CapitainsCtsPassage here to comply with parents args
+
+    :param urn: URN String
+    :param reference: Reference String
+    :return: Dictionary of arguments with URN based on identifier and reference
+    """
+    kwargs = {}
+    if identifier is not None:
+        if "urn:cts" in identifier :
+            if reference is not None:
+                kwargs["urn"] = URN("{}:{}".format(identifier.upTo(URN.VERSION), reference))
+            else:
+                kwargs["urn"] = identifier
+        else:
+            kwargs["urn"] = identifier
+    return kwargs
+
+
 #TODO
 class _NewSharedMethods(TeiResource):
-    def getTextualNode(self, textId=None, subreference=None, simple=False):
+    def getTextualNode(self, subreference=None, simple=False):
         """ Finds a passage in the current text
 
         :param subreference: Identifier of the subreference / passages
-        :type subreference: Union[list, CtsReference]
+        :type subreference: Union[list, DtsReference]
         :param simple: If set to true, retrieves nodes up to the given one, cleaning non required siblings.
         :type simple: boolean
         :rtype: CapitainsCtsPassage, ContextPassage
@@ -39,11 +65,11 @@ class _NewSharedMethods(TeiResource):
         if subreference is None:
             return self._getSimplePassage()
 
-        if not isinstance(subreference, CtsReference):
+        if not isinstance(subreference, DtsReference):
             if isinstance(subreference, str):
-                subreference = CtsReference(subreference)
+                subreference = DtsReference(subreference)
             elif isinstance(subreference, list):
-                subreference = CtsReference(".".join(subreference))
+                subreference = DtsReference(".".join(subreference))
 
         if len(subreference.start) > self.citation.root.depth:
             raise CitationDepthError("URN is deeper than citation scheme")
@@ -70,14 +96,14 @@ class _NewSharedMethods(TeiResource):
             root = copyNode(xml.getroot())
 
         root = passageLoop(xml, root, start, end)
-
+        """
         if self.urn:
             urn = URN("{}:{}".format(self.urn, subreference))
         else:
-            urn = None
+            urn = None"""
 
-        return CapitainsCtsPassage(
-            identifier=identifier,
+        return CapitainsDtsPassage(
+            identifier=self.identifier,
             resource=root,
             text=self,
             citation=citation_start,
@@ -108,7 +134,6 @@ class _NewSharedMethods(TeiResource):
             subcitation.fill(reference),
             namespaces=XPATH_NAMESPACES
         )
-
         if len(resource) != 1:
             raise InvalidURN
 
@@ -128,12 +153,12 @@ class _NewSharedMethods(TeiResource):
         :return: Textual Object with full capacities (Unlike Simple CapitainsCtsPassage)
         """
         text = None
-        if isinstance(self, CapitainsCtsText):
+        if isinstance(self, CapitainsDtsText):
             text = self
         return text
 
-    def getReffs(self, level: int = 1, subreference: CtsReference = None) -> CtsReferenceSet:
-        """ CtsReference available at a given level
+    def getReffs(self, level: int = 1, subreference: DtsReference = None) -> DtsReferenceSet:
+        """ DtsReference available at a given level
 
         :param level: Depth required. If not set, should retrieve first encountered level (1 based)
         :param subreference: Subreference (optional)
@@ -142,11 +167,125 @@ class _NewSharedMethods(TeiResource):
 
         if not subreference and hasattr(self, "reference"):
             subreference = self.reference
-        elif subreference and not isinstance(subreference, CtsReference):
-            subreference = CtsReference(subreference)
+        elif subreference and not isinstance(subreference, DtsReference):
+            subreference = DtsReference(subreference)
 
         return self.getValidReff(level=level, reference=subreference)
 
+    def getValidReff(self, level: int = 1, reference: DtsReference = None, _debug: bool = False) -> DtsReferenceSet:
+        """ Retrieve valid passages directly
+
+        :param level: Depth required. If not set, should retrieve first encountered level (1 based)
+        :type level: int
+        :param reference: CapitainsCtsPassage Reference
+        :type reference: DtsReference
+        :param _debug: Check on passages duplicates
+        :type _debug: bool
+        :returns: List of levels
+
+        .. note:: GetValidReff works for now as a loop using CapitainsCtsPassage, subinstances of CtsTextMetadata, to retrieve the valid \
+        informations. Maybe something is more powerfull ?
+        """
+
+        depth = 0
+        xml = self.textObject.xml
+
+        if reference:
+            if isinstance(reference, DtsReference):
+                if not reference.is_range():
+                    passages = [reference.start.list]
+                    depth = len(passages[0])
+                    if level == 0:
+                        level = None
+                        if _debug:
+                            warnings.warn("Using level=0 with a Non-range Reference is invalid. Autocorrected to 1")
+                else:
+                    xml = self.getTextualNode(subreference=reference)
+
+                    common = []
+
+                    for index, part in enumerate(reference.start.list):
+                        if index <= reference.end.depth:
+                            if part == reference.end.list[index]:
+                                common.append(part)
+                            else:
+                                break
+                        else:
+                            break
+
+                    passages = [common]
+                    depth = len(common)
+
+                    if level is None:
+                        level = reference.start.depth + depth
+                    elif level == 1:
+                        level = reference.start.depth + 1
+                    elif level == 0:
+                        level = reference.start.depth
+            else:
+                raise TypeError()
+        else:
+            passages = [[]]
+
+        if level is None:
+            level = 1
+
+        if level <= len(passages[0]) and reference is not None:
+            level = len(passages[0]) + 1
+        if level > len(self.citation.root):
+            raise CitationDepthError("The required level is too deep")
+
+        nodes = [None] * (level - depth)
+
+        citations = [citation for citation in self.citation.root]
+        while len(nodes) >= 1:
+            passages = [
+                refs + [node.get(current_citation.attribute.replace("xml:", "{http://www.w3.org/XML/1998/namespace}"))]
+                for xpath_result, refs, current_citation in [
+                    (
+                        xml.xpath(
+                            citations[len(filling) - 1].fill(filling),
+                            namespaces=XPATH_NAMESPACES
+                        ),
+                        refs,
+                        citations[len(filling) - 1]
+                    )
+                    for filling, refs in
+                    [(refs + [None], refs) for refs in passages]
+                ]
+                for node in xpath_result
+            ]
+            nodes.pop(0)
+
+            if len(passages) == 0:
+                msg = "Unknown reference {}".format(reference)
+                raise KeyError(msg)
+
+        passages = [".".join(passage) for passage in passages]
+
+        if _debug:
+            duplicates = set()
+            seen = set()
+            for n in passages:
+                if n in seen:
+                    duplicates.add(n)
+                else:
+                    seen.add(n)
+            if len(duplicates) > 0:
+                message = ", ".join(duplicates)
+                warnings.warn(message, DuplicateReference)
+            del duplicates
+            empties = [n for n in passages if n.rstrip('.') != n or n == '']
+            if len(empties) > 0:
+                message = '{} empty reference(s) at citation level {}'.format(len(empties), level)
+                warnings.warn(message, EmptyReference)
+
+        references = DtsReferenceSet(
+            [DtsReference(reff) for reff in passages],
+            citation=self.citation.root[level - 1],
+            level=level
+        )
+        return references
 
     def xpath(self, *args, **kwargs):
         """ Perform XPath on the passage XML
@@ -175,7 +314,7 @@ class _SimplePassage(_NewSharedMethods, PrototypeCtsPassage):
     :param resource: Element representing the passage
     :type resource: etree._Element
     :param reference: CapitainsCtsPassage reference
-    :type reference: CtsReference
+    :type reference: DtsReference
     :param urn: URN of the source text or of the passage
     :type urn: URN
     :param citation: XmlCtsCitation scheme of the text
@@ -199,10 +338,10 @@ class _SimplePassage(_NewSharedMethods, PrototypeCtsPassage):
 
     @property
     def reference(self):
-        """ URN CapitainsCtsPassage CtsReference
+        """ URN CapitainsCtsPassage DtsReference
 
-        :return: CtsReference
-        :rtype: CtsReference
+        :return: DtsReference
+        :rtype: DtsReference
         """
         return self._reference
 
@@ -214,7 +353,7 @@ class _SimplePassage(_NewSharedMethods, PrototypeCtsPassage):
     def childIds(self):
         """ Children of the passage
 
-        :rtype: None, CtsReference
+        :rtype: None, DtsReference
         :returns: Dictionary of chidren, where key are subreferences
         """
         if self.depth >= len(self.citation.root):
@@ -225,7 +364,7 @@ class _SimplePassage(_NewSharedMethods, PrototypeCtsPassage):
             self._children = self.getReffs()
             return self._children
 
-    def getReffs(self, level=1, subreference=None) -> CtsReferenceSet:
+    def getReffs(self, level=1, subreference=None) -> DtsReferenceSet:
         """ Reference available at a given level
 
         :param level: Depth required. If not set, should retrieve first encountered level (1 based). 0 retrieves inside
@@ -238,14 +377,14 @@ class _SimplePassage(_NewSharedMethods, PrototypeCtsPassage):
             subreference = self.reference
         return self.textObject.getValidReff(level, reference=subreference)
 
-    def getTextualNode(self, subreference: CtsReference=None):
+    def getTextualNode(self, subreference: DtsReference=None):
         """ Special GetPassage implementation for SimplePassage (Simple is True by default)
 
         :param subreference:
         :return:
         """
-        if not isinstance(subreference, CtsReference):
-            subreference = CtsReference(subreference)
+        if not isinstance(subreference, DtsReference):
+            subreference = DtsReference(subreference)
         return self.textObject.getTextualNode(subreference)
 
     @property
@@ -253,21 +392,21 @@ class _SimplePassage(_NewSharedMethods, PrototypeCtsPassage):
         """ Next passage
 
         :returns: Next passage at same level
-        :rtype: None, CtsReference
+        :rtype: None, DtsReference
         """
         return self.siblingsId[1]
 
     @property
-    def prevId(self) -> Optional[CtsReference]:
+    def prevId(self) -> Optional[DtsReference]:
         """ Get the Previous passage reference
 
         :returns: Previous passage reference at the same level
-        :rtype: None, CtsReference
+        :rtype: None, DtsReference
         """
         return self.siblingsId[0]
 
     @property
-    def siblingsId(self) -> Tuple[CtsReference, CtsReference]:
+    def siblingsId(self) -> Tuple[DtsReference, DtsReference]:
         """ Siblings Identifiers of the passage
 
         :rtype: (str, str)
@@ -314,7 +453,7 @@ class _SimplePassage(_NewSharedMethods, PrototypeCtsPassage):
         return self._text
 
 #TODO
-class CapitainsDtsText(_NewSharedMethods):
+class CapitainsDtsText(_NewSharedMethods, PrototypeDtsText):
     def __init__(self, identifier=None, citation=None, resource=None):
         super(CapitainsDtsText, self).__init__(identifier=identifier, citation=citation, resource=resource)
 
@@ -344,4 +483,208 @@ class CapitainsDtsText(_NewSharedMethods):
                 raise RefsDeclError(msg)
         except Exception as E:
             raise E
+
+class CapitainsDtsPassage(_NewSharedMethods, PrototypeDtsPassage):
+    """ CapitainsDtsPassage class for local texts which rebuilds the tree up to the passage.
+
+        For design purposes, some people would prefer the output of GetPassage to be consistent. ContextPassage rebuilds
+        the tree of the text up to the passage, keeping attributes of original nodes
+
+        **Example** :  for a text with a citation scheme with following refsDecl :
+        `/TEI/text/body/div[@type='edition']/div[@n='$1']/div[@n='$2']/l[@n='$3']` and a passage 1.1.1-1.2.3, this
+        class will build an XML tree looking like the following
+
+         .. code-block:: xml
+
+            <TEI ...>
+                <text ...>
+                    <body ...>
+                        <div type='edition' ...>
+                            <div n='1' ...>
+
+                                <div n='1' ...>
+                                    <l n='1'>...</l>
+                                    ...
+                                </div>
+                                <div n='2' ...>
+                                    <l n='3'>...</l>
+                                </div>
+                            </div>
+                        </div>
+                    </body>
+                </text>
+            </TEI>
+
+        :param reference: CapitainsCtsPassage reference
+        :type reference: DtsReference
+        :param urn: URN of the source text or of the passage
+        :type urn: URN
+        :param citation: XmlCtsCitation scheme of the text
+        :type citation: XmlCtsCitation
+        :param resource: Element representing the passage
+        :type resource: etree._Element
+        :param text: CtsTextMetadata containing the passage
+        :type text: CtsTextMetadata
+
+        .. note::
+            .prev, .next, .first and .last won't run on passage with a range made of two different level, such as
+            1.1-1.2.3 or 1-a.b. Those will raise `InvalidSiblingRequest`
+
+    """
+    def __init__(self, reference, identifier=None, citation=None, resource=None, text=None):
+        super(CapitainsDtsPassage, self).__init__(
+            citation=citation,
+            resource=resource,
+            #doit normalement prendre l'identifier et se voir ajouter la reference)
+            **_make_passage_kwargs(identifier, reference)
+        )
+        #A supprimer probablment
+        self._identifier = identifier
+        self._reference = reference
+        self._text = text
+        self._children = None
+        self._depth = self._depth_2 = 1
+
+        if self.reference and self.reference.start:
+            self._depth_2 = self._depth = self.reference.start.depth
+        if self.reference.is_range() and self.reference.end:
+            self._depth_2 = self.reference.end.depth
+
+        self._prev_next = None  # For caching purpose
+
+    @property
+    def reference(self):
+        """ DtsReference of the object
+        """
+        return self._reference
+
+    @property
+    def childIds(self):
+        """ Children of the passage
+
+        :rtype: None, DtsReference
+        :returns: Dictionary of chidren, where key are subreferences
+        """
+        self._raise_depth()
+        if self.depth >= len(self.citation.root):
+            return []
+        elif self._children is not None:
+            return self._children
+        else:
+            self._children = self.getReffs()
+            return self._children
+
+    @property
+    def nextId(self):
+        """ Next passage
+
+        :returns: Next passage at same level
+        :rtype: None, DtsReference
+        """
+        return self.siblingsId[1]
+
+    @property
+    def prevId(self):
+        """ Get the Previous passage reference
+
+        :returns: Previous passage reference at the same level
+        :rtype: None, DtsReference
+        """
+        return self.siblingsId[0]
+
+    def _raise_depth(self):
+        """ Simple check that raises an exception if the passage cannot run first, last, next or prev
+
+        See object notes
+
+        :raise: InvalidSiblingRequest
+        """
+        if self._depth != self._depth_2:
+            raise InvalidSiblingRequest()
+
+    @property
+    def siblingsId(self) -> Tuple[DtsReference, DtsReference]:
+        """ Siblings Identifiers of the passage
+
+        :rtype: (str, str)
+        """
+        self._raise_depth()
+
+        if not self._text:
+            raise MissingAttribute("CapitainsCtsPassage was initiated without CtsTextMetadata object")
+        if self._prev_next:
+            return self._prev_next
+
+        document_references = self._text.getReffs(level=self.depth)
+
+        if self.reference.is_range():
+            start, end = self.reference.start, self.reference.end
+            range_length = len(self.getReffs(level=0))
+        else:
+            start = end = self.reference.start
+            range_length = 1
+
+        start = document_references.index(start)
+        end = document_references.index(end)
+
+        if start == 0:
+            # If the passage is already at the beginning
+            _prev = None
+        elif start - range_length < 0:
+            if start == end:
+                _prev = document_references[0]
+            else:
+                _prev = "{}-{}".format(document_references[0], document_references[start-1])
+        else:
+            if start == end:
+                _prev = document_references[start-1]
+            else:
+                _prev = "{}-{}".format(document_references[start-range_length], document_references[start-1])
+
+        if start + 1 == len(document_references) or end + 1 == len(document_references):
+            # If the passage is already at the end
+            _next = None
+        elif end + range_length >= len(document_references):
+            if start == end:
+                _next = document_references[-1]
+            else:
+                _next = "{}-{}".format(document_references[end+1], document_references[-1])
+        else:
+            if start == end:
+                _next = document_references[end+1]
+            else:
+                _next = "{}-{}".format(document_references[end+1], document_references[end + range_length])
+
+        self._prev_next = (DtsReference(_prev), DtsReference(_next))
+        return self._prev_next
+
+    @property
+    def next(self):
+        """ Next CapitainsCtsPassage (Interactive CapitainsCtsPassage)
+        """
+        if self.nextId is not None:
+            return super(CapitainsCtsPassage, self).getTextualNode(subreference=self.nextId)
+
+    @property
+    def prev(self):
+        """ Previous CapitainsCtsPassage (Interactive CapitainsCtsPassage)
+        """
+        if self.prevId is not None:
+            return super(CapitainsCtsPassage, self).getTextualNode(subreference=self.prevId)
+
+    def getTextualNode(self, subreference=None, *args, **kwargs):
+        if not isinstance(subreference, DtsReference):
+            subreference = DtsReference(subreference)
+        X = super(CapitainsCtsPassage, self).getTextualNode(subreference=subreference)
+        X._text = self._text
+        return X
+
+    @property
+    def textObject(self):
+        """ CtsTextMetadata Object. Required for NextPrev
+
+        :rtype: CapitainsCtsText
+        """
+        return self._text
+
 
